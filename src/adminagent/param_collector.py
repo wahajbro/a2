@@ -12,10 +12,18 @@ The executor checks each spec in order:
   - If already in `initial` and valid → skip
   - If missing or invalid → request_info pause → human fills it → loops back
 Once all collected → sends CollectedParams to next executor.
+
+CHANGE vs original:
+  Added handle_messages() — accepts list[ChatMessage] so that workflow.as_agent()
+  works when WorkflowAgent feeds the start executor list[ChatMessage].
+  The initial extracted dict is stored in self._initial at build time, so
+  the message content is irrelevant — we just ignore it and use self._initial.
+  This is the ONLY change. All pause/resume logic is untouched.
 """
 
 #from __future__ import annotations
 from agent_framework import Executor, WorkflowContext, handler, response_handler
+from agent_framework import ChatMessage          # needed for list[ChatMessage] type hint
 from messages import ParamSpec, ParamAskRequest, CollectedParams, WorkflowResult
 
 
@@ -25,11 +33,20 @@ class ParamCollectorExecutor(Executor):
         self._specs   = specs
         self._initial = initial
 
+    # ── called by workflow_runner (CLI) with a plain dict ─────────────────────
     @handler
     async def handle(self, request: dict, ctx: WorkflowContext) -> None:
-        # request here is the initial dict passed in — we use self._initial
         await _collect(self._specs, dict(self._initial), ctx)
 
+    # ── called by WorkflowAgent (server) with list[ChatMessage] ──────────────
+    # WorkflowAgent._normalize_messages() always passes list[ChatMessage].
+    # The extracted params are already in self._initial from build(), so we
+    # ignore the message content entirely and start collecting from self._initial.
+    @handler
+    async def handle_messages(self, request: list[ChatMessage], ctx: WorkflowContext) -> None:
+        await _collect(self._specs, dict(self._initial), ctx)
+
+    # ── response handler — same for both CLI and server paths ─────────────────
     @response_handler
     async def handle_response(
         self,
@@ -38,12 +55,11 @@ class ParamCollectorExecutor(Executor):
         ctx: WorkflowContext,
     ) -> None:
         current  = dict(original_request.current)
-        specs    = original_request.remaining_specs  # specs still to check after this field
+        specs    = original_request.remaining_specs
         field    = original_request.field
         choices  = original_request.choices
         value    = response.strip()
 
-        # Validate choice-based fields
         if choices:
             choice_values = [c.lower() for c in choices]
             if value.isdigit():
@@ -73,44 +89,33 @@ class ParamCollectorExecutor(Executor):
             return
 
         current[field] = value
-
-        # Continue checking remaining specs
-        all_specs_from_here = [ParamSpec(field=original_request.field, prompt="", choices=choices)] + list(specs)
-        # But field is now filled — just continue with remaining
         await _collect(list(specs), current, ctx)
 
 
-# new
 async def _collect(specs: list[ParamSpec], current: dict, ctx: WorkflowContext) -> None:
     """Walk specs in order; pause on first missing/invalid one."""
     for i, spec in enumerate(specs):
-        # skip slug entirely when removing from standard
+        # skip slug entirely when removing from standard scope
         if spec.field == "slug" and current.get("scope") == "standard":
             current["slug"] = ""
             continue
 
         val = current.get(spec.field, "").strip()
 
-        # Validate against choices if provided
         if spec.choices and val.lower() not in [c.lower() for c in spec.choices]:
-            val = ""  # treat as missing if invalid
+            val = ""
 
         if not val:
-            # Build prompt with numbered choices if available
-            prompt = spec.prompt
-            
-
             await ctx.request_info(
                 request_data=ParamAskRequest(
                     field=spec.field,
-                    prompt=prompt,
+                    prompt=spec.prompt,
                     choices=spec.choices,
                     current=current,
-                    remaining_specs=specs[i+1:],  # specs after this one
+                    remaining_specs=specs[i+1:],
                 ),
                 response_type=str,
             )
-            return  # pause — response_handler takes over
+            return
 
-    # All specs satisfied — send forward
     await ctx.send_message(CollectedParams(params=current))
