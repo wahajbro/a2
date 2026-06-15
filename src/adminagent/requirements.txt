@@ -1,0 +1,29 @@
+# #azure-ai-projects==2.0.0b3
+# #openai
+# #uvicorn
+# #mcp
+# httpx
+# python-dotenv
+# agent-framework-core
+# agent-framework-orchestrations
+# azure-identity
+# # WFCF Admin Agent — requirements
+# # Python >= 3.10
+
+# # Microsoft Agent Framework — core + Azure integration
+# #agent-framework==1.8.1          # Executor, WorkflowBuilder, WorkflowContext, WorkflowEvent, handler, response_handler
+
+# # Azure OpenAI client for MAF (AzureOpenAIResponsesClient, as_agent)
+# # install separately with --pre flag:
+# #   pip install agent-framework-azure-ai --pre
+# agent-framework-azure-ai
+# WFCF Admin Agent — requirements
+# Python >= 3.10
+agent-framework-core==1.8.1
+agent-framework-foundry==1.8.1
+azure-identity
+httpx
+python-dotenv
+azure-monitor-opentelemetry
+opentelemetry-instrumentation-httpx
+#pip install agent-framework-core==1.8.1 agent-framework-foundry==1.8.1 azure-identity httpx python-dotenv
