@@ -22,8 +22,8 @@ CHANGE vs original:
 """
 
 #from __future__ import annotations
-from agent_framework import Executor, WorkflowContext, handler, response_handler
-from agent_framework import ChatMessage          # needed for list[ChatMessage] type hint
+from agent_framework import Executor, WorkflowContext, handler, response_handler, Message
+#from agent_framework import ChatMessage          # needed for list[ChatMessage] type hint
 from messages import ParamSpec, ParamAskRequest, CollectedParams, WorkflowResult
 
 
@@ -43,14 +43,14 @@ class ParamCollectorExecutor(Executor):
     # The extracted params are already in self._initial from build(), so we
     # ignore the message content entirely and start collecting from self._initial.
     @handler
-    async def handle_messages(self, request: list[ChatMessage], ctx: WorkflowContext) -> None:
+    async def handle_messages(self, request: list[Message], ctx: WorkflowContext) -> None:
         await _collect(self._specs, dict(self._initial), ctx)
 
     # ── response handler — same for both CLI and server paths ─────────────────
     @response_handler
     async def handle_response(
         self,
-        original_request: ParamAskRequest,
+        original_request: ParamAskRequest,  
         response: str,
         ctx: WorkflowContext,
     ) -> None:

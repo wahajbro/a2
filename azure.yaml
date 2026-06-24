@@ -25,7 +25,7 @@ services:
                   sku:
                     capacity: 10
                     name: GlobalStandard
-            startupCommand: python main.py
+            startupCommand: python main.py serve
 infra:
     provider: bicep
     path: ./infra

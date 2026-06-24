@@ -1,19 +1,12 @@
-"""workflows/create_standard.py
+"""workflows/create_standard.py — server-only."""
 
-Flow:
-  ParamCollectorExecutor  → collects: name (slug), display_name (optional — defaults to name)
-  ConfirmExecutor         → shows summary and asks yes/no
-  CreateStandardExecutor  → calls create_standard MCP
-"""
-
-#from __future__ import annotations
-from agent_framework import Executor, WorkflowContext, WorkflowBuilder, handler, response_handler
-from messages import CollectedParams, ConfirmRequest, WorkflowResult, ParamSpec
-from param_collector import ParamCollectorExecutor
+from typing import Any
+from agent_framework import Executor, WorkflowContext, handler, response_handler
+from messages import CollectedParams, WorkflowResult
 from mcp_client import call_mcp
+from request_compat import rget
+from action_queue import advance_or_finish
 
-
-# ── Executor 1: Confirm ───────────────────────────────────────────────────────
 
 class ConfirmCreateExecutor(Executor):
     def __init__(self):
@@ -24,27 +17,28 @@ class ConfirmCreateExecutor(Executor):
         p = request.params
         display = p.get("display_name") or p["name"]
         await ctx.request_info(
-            request_data=ConfirmRequest(
-                message=(
+            request_data={
+                "_type": "confirm",
+                "message": (
                     f"Create new standard?\n"
                     f"  Slug:         {p['name']}\n"
                     f"  Display name: {display}\n"
                     f"Type 'yes' to confirm or 'no' to cancel:"
                 ),
-                carry=p,
-            ),
+                "choices": ["yes", "no"],
+                "carry": p,
+            },
             response_type=str,
         )
 
     @response_handler
-    async def handle_confirm(self, original_request: ConfirmRequest, response: str, ctx: WorkflowContext) -> None:
-        if response.strip().lower() not in ("yes", "y"):
+    async def handle_confirm(self, original_request: Any, response: str, ctx: WorkflowContext) -> None:
+        carry = rget(original_request, "carry", {})
+        if response.strip().lower() not in ("yes", "y", "confirm"):
             await ctx.yield_output(WorkflowResult(status="cancelled", message="Standard creation cancelled."))
             return
-        await ctx.send_message(CollectedParams(params=original_request.carry))
+        await ctx.send_message(CollectedParams(params=carry))
 
-
-# ── Executor 2: Create ────────────────────────────────────────────────────────
 
 class CreateStandardExecutor(Executor):
     def __init__(self):
@@ -53,10 +47,7 @@ class CreateStandardExecutor(Executor):
     @handler
     async def handle(self, request: CollectedParams, ctx: WorkflowContext) -> None:
         p = request.params
-        args = {
-            "name":         p["name"],
-            "display_name": p.get("display_name") or p["name"],
-        }
+        args = {"name": p["name"], "display_name": p.get("display_name") or p["name"]}
 
         result = await call_mcp("create_standard", args)
         if "error" in result:
@@ -64,31 +55,8 @@ class CreateStandardExecutor(Executor):
             return
 
         warnings = result.get("warnings", [])
-        await ctx.yield_output(WorkflowResult(
+        await advance_or_finish(ctx, WorkflowResult(
             status="success",
-            message=(
-                f"✓ Standard '{result.get('name')}' created "
-                f"(display: '{result.get('display_name')}')."
-            ),
+            message=f"✓ Standard '{result.get('name')}' created (display: '{result.get('display_name')}').",
             warnings=warnings,
         ))
-
-
-# ── Builder ───────────────────────────────────────────────────────────────────
-
-async def build(extracted: dict) -> tuple:
-    specs = [
-        ParamSpec("name", "Standard slug (e.g. 'organic', 'iso9001'):", choices=[]),
-    ]
-
-    collector = ParamCollectorExecutor(specs=specs, initial=extracted)
-    confirm   = ConfirmCreateExecutor()
-    create    = CreateStandardExecutor()
-
-    workflow = (
-        WorkflowBuilder(start_executor=collector)
-        .add_edge(collector, confirm)
-        .add_edge(confirm, create)
-        .build()
-    )
-    return workflow, extracted

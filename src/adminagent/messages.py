@@ -62,4 +62,10 @@ class ConfirmRequest:
 class WorkflowResult:
     status: str         # "success" | "failed" | "already_done" | "cancelled"
     message: str
-    warnings: list = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    def __str__(self) -> str:
+        # Without this, str(result) — which is what the hosting layer does
+        # whenever a yield_output isn't a plain string — prints the raw
+        # dataclass repr straight into chat. CLI mode is unaffected; it
+        # reads .status/.message/.warnings directly, never str(result).
+        return self.message

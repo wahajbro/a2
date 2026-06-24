@@ -1,22 +1,17 @@
-"""workflows/add_user_to_standard.py
+"""workflows/add_user_to_standard.py — server-only.
 
-Flow:
-  ParamCollectorExecutor  → collects: standard (validated vs real list), tier, user_query
-  SearchUsersExecutor     → calls search_users MCP, pauses for human pick
-  AssignStandardExecutor  → calls assign_user_to_standard MCP
+Flow: SearchUsersExecutor (search + human pick) -> AssignStandardExecutor.
+Param collection (standard/tier/user_query) happens upstream in
+router_workflow.py's BridgeAddUserStandard before this is ever reached.
 """
 
-#from __future__ import annotations
-from agent_framework import Executor, WorkflowContext, WorkflowBuilder, handler, response_handler
-from messages import (
-    CollectedParams, UserPickRequest, UserPickResult,
-    WorkflowResult, ParamSpec, ConfirmRequest,
-)
-from param_collector import ParamCollectorExecutor
+from typing import Any
+from agent_framework import Executor, WorkflowContext, handler, response_handler
+from messages import CollectedParams, UserPickResult, WorkflowResult
 from mcp_client import call_mcp
+from request_compat import rget
+from action_queue import advance_or_finish
 
-
-# ── Executor 1: Search ────────────────────────────────────────────────────────
 
 class SearchUsersExecutor(Executor):
     def __init__(self):
@@ -48,16 +43,18 @@ class SearchUsersExecutor(Executor):
         ]
 
         await ctx.request_info(
-            request_data=UserPickRequest(
-                matches=matches,
-                carry={"standard": p["standard"], "tier": p["tier"]},
-            ),
+            request_data={
+                "_type": "user_pick",
+                "matches": matches,
+                "carry": {"standard": p["standard"], "tier": p["tier"]},
+            },
             response_type=str,
         )
 
     @response_handler
-    async def handle_pick(self, original_request: UserPickRequest, response: str, ctx: WorkflowContext) -> None:
-        matches = original_request.matches
+    async def handle_pick(self, original_request: Any, response: str, ctx: WorkflowContext) -> None:
+        matches = rget(original_request, "matches", [])
+        carry   = rget(original_request, "carry", {})
         chosen_oid = chosen_name = chosen_email = None
 
         if response.strip().isdigit():
@@ -67,7 +64,7 @@ class SearchUsersExecutor(Executor):
                 chosen_name  = matches[idx]["name"]
                 chosen_email = matches[idx]["email"]
             else:
-                await ctx.yield_output(WorkflowResult(status="failed", message=f"Pick between 1 and {len(matches)}."))
+                await ctx.yield_output(WorkflowResult(status="failed", message=f"Pick between 1 and {len(matches)}, or type 'cancel'."))
                 return
         else:
             for m in matches:
@@ -76,28 +73,30 @@ class SearchUsersExecutor(Executor):
                     break
 
         if not chosen_oid:
-            await ctx.yield_output(WorkflowResult(status="failed", message="Not found. Enter the number shown."))
+            await ctx.yield_output(WorkflowResult(status="failed", message="Not found. Enter the number shown, or type 'cancel'."))
             return
 
         await ctx.send_message(UserPickResult(
             oid=chosen_oid, name=chosen_name, email=chosen_email,
-            carry=original_request.carry,
+            carry=carry,
         ))
 
-
-# ── Executor 2: Assign ────────────────────────────────────────────────────────
 
 class AssignStandardExecutor(Executor):
     def __init__(self):
         super().__init__(id="assign_standard")
 
     @handler
-    async def handle(self, request: UserPickResult, ctx: WorkflowContext) -> None:
-        c = request.carry
+    async def handle(self, request: Any, ctx: WorkflowContext) -> None:
+        c     = rget(request, "carry", {})
+        oid   = rget(request, "oid")
+        name  = rget(request, "name")
+        email = rget(request, "email")
+
         result = await call_mcp("assign_user_to_standard", {
             "standard": c["standard"],
             "tier":     c["tier"],
-            "user_oid": request.oid,
+            "user_oid": oid,
         })
 
         if "error" in result:
@@ -105,45 +104,13 @@ class AssignStandardExecutor(Executor):
             return
 
         if result.get("already_member"):
-            await ctx.yield_output(WorkflowResult(
+            await advance_or_finish(ctx, WorkflowResult(
                 status="already_done",
-                message=f"{request.name} ({request.email}) is already a {c['tier']} of '{c['standard']}' — no change.",
+                message=f"{name} ({email}) is already a {c['tier']} of '{c['standard']}' — no change.",
             ))
             return
 
-        await ctx.yield_output(WorkflowResult(
+        await advance_or_finish(ctx, WorkflowResult(
             status="success",
-            message=f"✓ Added {request.name} ({request.email}) to '{c['standard']}' as {c['tier']}.",
+            message=f"✓ Added {name} ({email}) to '{c['standard']}' as {c['tier']}.",
         ))
-
-
-# ── Builder ───────────────────────────────────────────────────────────────────
-
-async def build(extracted: dict) -> tuple:
-    """Fetch real standards, build param specs, return (workflow, initial_message)."""
-    std_result = await call_mcp("list_standards", {})
-    standards  = std_result.get("standards", []) if "error" not in std_result else []
-    std_slugs  = [s["name"] for s in standards]
-    std_prompt = "Which standard?\n" + "\n".join(
-        f"  {i+1}. {s['name']} — {s.get('display_name', s['name'])}"
-        for i, s in enumerate(standards)
-    )
-
-    specs = [
-        ParamSpec("standard",    std_prompt,                         choices=std_slugs),
-        ParamSpec("tier",        "Add as 'user' or 'admin'?",        choices=["user", "admin"]),
-        ParamSpec("user_query",  "Name of the person to add?",       choices=[]),
-    ]
-
-    collector = ParamCollectorExecutor(specs=specs, initial=extracted)
-    search    = SearchUsersExecutor()
-    assign    = AssignStandardExecutor()
-
-    workflow = (
-        WorkflowBuilder(start_executor=collector)
-        .add_edge(collector, search)
-        .add_edge(search, assign)
-        .build()
-    )
-    # ParamCollectorExecutor.handle receives the initial dict as message
-    return workflow, extracted
